@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kafka Load Tester</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <h1>Kafka Load Tester</h1>
+      <div class="conn-status">
+        <span class="dot" id="ws-dot"></span>
+        <span id="ws-label">Connecting…</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- ── Kafka Health ─────────────────────────────────── -->
+    <section class="card" id="kafka-health">
+      <h2>Kafka Health</h2>
+      <div class="broker-list" id="broker-list">—</div>
+      <h3 style="margin-top:1rem">Topics</h3>
+      <table id="topic-table">
+        <thead><tr><th>Topic</th><th>Partitions</th><th>Replication</th><th>Total Offsets</th></tr></thead>
+        <tbody id="topic-body"></tbody>
+      </table>
+    </section>
+
+    <!-- ── Load Test Controls ───────────────────────────── -->
+    <section class="card" id="load-controls">
+      <h2>Load Test</h2>
+      <div class="controls-grid">
+        <label>Topic<input id="cfg-topic" type="text" value="load-test"></label>
+        <label>Workers<input id="cfg-workers" type="number" min="1" max="1000" value="10"></label>
+        <label>Msg/sec target<input id="cfg-rate" type="number" min="1" value="1000"></label>
+        <label>Msg size (bytes)<input id="cfg-size" type="number" min="1" value="1024"></label>
+        <label>Duration (s, 0=∞)<input id="cfg-duration" type="number" min="0" value="0"></label>
+        <label>Key strategy
+          <select id="cfg-key">
+            <option value="random">random</option>
+            <option value="sequential">sequential</option>
+            <option value="fixed">fixed</option>
+          </select>
+        </label>
+      </div>
+      <div class="action-row">
+        <button id="btn-start" class="btn-primary" onclick="startTest()">Start</button>
+        <button id="btn-stop" class="btn-danger" onclick="stopTest()" disabled>Stop</button>
+        <span id="test-status" class="status-badge idle">Idle</span>
+        <span id="elapsed-label"></span>
+      </div>
+    </section>
+
+    <!-- ── Event Log ────────────────────────────────────── -->
+    <section class="card full-width" id="event-log-section">
+      <div class="log-header">
+        <h2>Event Log</h2>
+        <button class="btn-secondary" onclick="clearLog()">Clear</button>
+      </div>
+      <div id="event-log" class="event-log"></div>
+    </section>
+
+    <!-- ── Performance Metrics ──────────────────────────── -->
+    <section class="card" id="perf-metrics">
+      <h2>Performance</h2>
+      <div class="stat-grid">
+        <div class="stat"><div class="stat-val" id="s-total">0</div><div class="stat-lbl">Messages Sent</div></div>
+        <div class="stat"><div class="stat-val" id="s-rate">0</div><div class="stat-lbl">Msg/sec</div></div>
+        <div class="stat"><div class="stat-val" id="s-mb">0.00</div><div class="stat-lbl">MB/sec</div></div>
+        <div class="stat"><div class="stat-val" id="s-errors">0</div><div class="stat-lbl">Errors</div></div>
+        <div class="stat"><div class="stat-val" id="s-errpct">0.00%</div><div class="stat-lbl">Error Rate</div></div>
+        <div class="stat"><div class="stat-val" id="s-p50">0</div><div class="stat-lbl">Latency p50 (ms)</div></div>
+        <div class="stat"><div class="stat-val" id="s-p95">0</div><div class="stat-lbl">Latency p95 (ms)</div></div>
+        <div class="stat"><div class="stat-val" id="s-p99">0</div><div class="stat-lbl">Latency p99 (ms)</div></div>
+      </div>
+      <div id="last-error" class="error-box" style="display:none"></div>
+    </section>
+
+    <!-- ── Live Charts ──────────────────────────────────── -->
+    <section class="card chart-card">
+      <h2>Throughput (msg/sec)</h2>
+      <div class="chart-scroll-wrap">
+        <div class="chart-inner" id="rate-inner">
+          <canvas id="chart-rate"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <section class="card chart-card">
+      <h2>Latency p99 (ms)</h2>
+      <div class="chart-scroll-wrap">
+        <div class="chart-inner" id="latency-inner">
+          <canvas id="chart-latency"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── History ──────────────────────────────────────── -->
+    <section class="card full-width" id="history-section">
+      <div class="history-header">
+        <h2>Run History</h2>
+        <button class="btn-secondary" onclick="loadHistory()">Refresh</button>
+      </div>
+      <table id="history-table">
+        <thead>
+          <tr>
+            <th>Started</th><th>Duration</th><th>Topic</th>
+            <th>Workers</th><th>Target msg/s</th>
+            <th>Sent</th><th>Errors</th>
+            <th>Avg msg/s</th><th>Avg MB/s</th><th>p99 (ms)</th>
+          </tr>
+        </thead>
+        <tbody id="history-body"><tr><td colspan="10" style="text-align:center">Loading…</td></tr></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

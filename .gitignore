@@ -1,0 +1,21 @@
+# Build output
+kafka-agent
+/kafka-agent.exe
+
+# Runtime data (flat file storage — mount as volume, don't commit)
+/data/
+
+# Go
+*.test
+*.out
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

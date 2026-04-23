@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kafka-agent-data
+  labels:
+    app: kafka-agent
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  # storageClassName: standard        # GKE: standard | EKS: gp2 | AKS: managed-premium
+  # Omit storageClassName to use cluster default

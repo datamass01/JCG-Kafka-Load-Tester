@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-agent-config
+  labels:
+    app: kafka-agent
+data:
+  config.yaml: |
+    kafka:
+      brokers:
+        - "kafka-broker:9092"
+      sasl:
+        enabled: false
+      tls:
+        enabled: false
+      version: "3.6.0"
+    load_test:
+      topic: "load-test"
+      partitions: 3
+      replication_factor: 3
+      workers: 10
+      target_msg_per_sec: 1000
+      message_size_bytes: 1024
+      duration_seconds: 0
+      key_strategy: "random"
+      value_strategy: "random"
+    dashboard:
+      host: "0.0.0.0"
+      port: 8080
+    storage:
+      data_dir: "/data"
+      metrics_retention_hours: 24
+      rotation_size_mb: 50
