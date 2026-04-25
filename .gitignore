@@ -1,6 +1,10 @@
 # Build output
 kafka-agent
-/kafka-agent.exe
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
 
 # Runtime data (flat file storage — mount as volume, don't commit)
 /data/
@@ -8,7 +12,12 @@ kafka-agent
 # Go
 *.test
 *.out
+coverage.*
+*.coverprofile
+profile.cov
 vendor/
+go.work
+go.work.sum
 
 # IDE
 .vscode/
@@ -19,3 +28,6 @@ vendor/
 # OS
 .DS_Store
 Thumbs.db
+
+# env
+.env
