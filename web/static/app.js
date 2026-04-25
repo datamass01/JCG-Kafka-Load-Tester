@@ -70,6 +70,63 @@ function clearLog() {
   logMsg('Log cleared', 'info');
 }
 
+// ── Kafka Instance Selector ──────────────────────────────
+let _connectedBroker = null;
+
+async function connectBrokers() {
+  const val = document.getElementById('instance-manual').value.trim();
+  if (!val) return;
+  logMsg(`Connecting to brokers: ${val}`, 'info');
+  try {
+    const res = await fetch('/api/kafka/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ brokers: val }),
+    });
+    if (!res.ok) {
+      const msg = await res.text();
+      logMsg(`Connect failed: ${msg.trim()}`, 'error');
+      return;
+    }
+    _connectedBroker = val;
+    document.getElementById('instance-manual').value = '';
+    renderConnectedBroker();
+    logMsg(`Connected to ${val}`, 'success');
+  } catch (e) {
+    logMsg(`Connect error: ${e}`, 'error');
+  }
+}
+
+function renderConnectedBroker() {
+  const el = document.getElementById('connected-broker');
+  if (!_connectedBroker) {
+    el.innerHTML = '';
+    return;
+  }
+  el.innerHTML = `<span class="connected-chip">
+    <span class="dot connected"></span>
+    ${_connectedBroker}
+    <button class="chip-disconnect" onclick="disconnectBroker()" title="Disconnect">&#x2715;</button>
+  </span>`;
+}
+
+async function disconnectBroker() {
+  logMsg(`Disconnecting from: ${_connectedBroker}`, 'info');
+  try {
+    const res = await fetch('/api/kafka/disconnect', { method: 'POST' });
+    if (!res.ok) {
+      const msg = await res.text();
+      logMsg(`Disconnect failed: ${msg.trim()}`, 'error');
+      return;
+    }
+    logMsg(`Disconnected from ${_connectedBroker}`, 'warn');
+    _connectedBroker = null;
+    renderConnectedBroker();
+  } catch (e) {
+    logMsg(`Disconnect error: ${e}`, 'error');
+  }
+}
+
 // ── WebSocket ────────────────────────────────────────────
 let ws, wsRetry = 1000;
 
@@ -213,7 +270,7 @@ function updateKafka(kafka) {
   const brokerEl = document.getElementById('broker-list');
   if (kafka.brokers && kafka.brokers.length) {
     brokerEl.innerHTML = kafka.brokers.map(b =>
-      `<span class="broker-chip ${b.connected ? 'up' : 'down'}">${b.host} ${b.connected ? '✓' : '✗'}</span>`
+      `<span class="broker-chip ${b.connected ? 'up' : 'down'}">node-${b.id}${b.is_controller ? ' <span class="leader-badge">leader</span>' : ''} · ${b.host} ${b.connected ? '✓' : '✗'}</span>`
     ).join('');
     kafka.brokers.forEach(b => {
       const prev = _brokerState[b.host];

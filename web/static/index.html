@@ -19,6 +19,16 @@
   </header>
 
   <main>
+    <!-- ── Kafka Instance Selector ────────────────────────── -->
+    <section class="card full-width" id="instance-section">
+      <h2>Kafka Instance</h2>
+      <div class="instance-row">
+        <input id="instance-manual" type="text" placeholder="Enter brokers: host:port,host:port" style="flex:1;min-width:220px">
+        <button class="btn-secondary" onclick="connectBrokers()">Connect</button>
+      </div>
+      <div id="connected-broker"></div>
+    </section>
+
     <!-- ── Kafka Health ─────────────────────────────────── -->
     <section class="card" id="kafka-health">
       <h2>Kafka Health</h2>
@@ -68,7 +78,7 @@
     <section class="card" id="perf-metrics">
       <h2>Performance</h2>
       <div class="stat-grid">
-        <div class="stat"><div class="stat-val" id="s-total">0</div><div class="stat-lbl">Messages Sent</div></div>
+        <div class="stat stat-full"><div class="stat-val" id="s-total">0</div><div class="stat-lbl">Messages Sent</div></div>
         <div class="stat"><div class="stat-val" id="s-rate">0</div><div class="stat-lbl">Msg/sec</div></div>
         <div class="stat"><div class="stat-val" id="s-mb">0.00</div><div class="stat-lbl">MB/sec</div></div>
         <div class="stat"><div class="stat-val" id="s-errors">0</div><div class="stat-lbl">Errors</div></div>

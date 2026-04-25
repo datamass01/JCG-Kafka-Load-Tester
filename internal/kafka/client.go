@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/IBM/sarama"
 	"kafka-agent/internal/config"
@@ -23,6 +24,21 @@ func NewSaramaConfig(cfg *config.KafkaConfig) (*sarama.Config, error) {
 	sc.Producer.Return.Errors = true
 	sc.Producer.RequiredAcks = sarama.WaitForAll
 	sc.Producer.Compression = sarama.CompressionSnappy
+
+	// Retry window must outlast a worst-case KRaft leader election. Under load
+	// these have been observed to take 60–90 s, so we allow ~90 s before a
+	// message is surfaced as failed: 90 retries × 1 s.
+	sc.Producer.Retry.Max = 90
+	sc.Producer.Retry.Backoff = 1 * time.Second
+
+	sc.Metadata.Retry.Max = 10
+	sc.Metadata.Retry.Backoff = 1 * time.Second
+	sc.Metadata.RefreshFrequency = 5 * time.Second
+
+	// Bound network operations so a dead broker cannot wedge a goroutine.
+	sc.Net.DialTimeout = 10 * time.Second
+	sc.Net.ReadTimeout = 10 * time.Second
+	sc.Net.WriteTimeout = 10 * time.Second
 
 	if cfg.TLS.Enabled {
 		tlsCfg, err := buildTLSConfig(&cfg.TLS)

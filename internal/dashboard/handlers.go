@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -19,14 +21,23 @@ var upgrader = websocket.Upgrader{
 }
 
 type Server struct {
-	cfg       *config.Config
-	admin     *kafka.AdminClient
-	producer  *kafka.Producer
-	collector *kafka.MetricsCollector
-	agg       *metrics.Aggregator
-	store     *storage.Store
-	hub       *wsHub
-	ready     bool
+	cfg          *config.Config
+	admin        *kafka.AdminClient
+	producer     *kafka.Producer
+	collector    *kafka.MetricsCollector
+	agg          *metrics.Aggregator
+	store        *storage.Store
+	hub          *wsHub
+	ready        bool
+	instanceMu   sync.RWMutex
+	rootCtx      context.Context
+	prevInstance string // instance active before the last ad-hoc connect
+}
+
+func (s *Server) activeCollector() *kafka.MetricsCollector {
+	s.instanceMu.RLock()
+	defer s.instanceMu.RUnlock()
+	return s.collector
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -62,17 +73,98 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBrokers(w http.ResponseWriter, r *http.Request) {
-	m := s.collector.Latest()
+	m := s.activeCollector().Latest()
 	writeJSON(w, m.Brokers)
 }
 
 func (s *Server) handleTopics(w http.ResponseWriter, r *http.Request) {
-	m := s.collector.Latest()
+	m := s.activeCollector().Latest()
 	writeJSON(w, m.Topics)
 }
 
 func (s *Server) handleKafkaMetrics(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.collector.Latest())
+	writeJSON(w, s.activeCollector().Latest())
+}
+
+
+// handleConnectBrokers accepts a comma-separated broker string, registers it as an
+// ad-hoc instance if not already known, and makes it the active instance.
+func (s *Server) handleConnectBrokers(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Brokers string `json:"brokers"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	brokers := splitBrokers(body.Brokers)
+	if len(brokers) == 0 {
+		http.Error(w, "brokers required", http.StatusBadRequest)
+		return
+	}
+	name := strings.Join(brokers, ",")
+
+	s.instanceMu.Lock()
+	if s.cfg.FindInstance(name) == nil {
+		version := s.cfg.Kafka.Version
+		if active := s.cfg.ActiveKafkaInstance(); active != nil {
+			version = active.Version
+		}
+		s.cfg.KafkaInstances = append(s.cfg.KafkaInstances, config.KafkaInstanceConfig{
+			Name:    name,
+			Brokers: brokers,
+			Version: version,
+			AdHoc:   true,
+		})
+	}
+	// Remember the pre-connect instance the first time we go ad-hoc.
+	if s.prevInstance == "" {
+		if current := s.cfg.ActiveKafkaInstance(); current != nil && !current.AdHoc {
+			s.prevInstance = current.Name
+		}
+	}
+	s.instanceMu.Unlock()
+
+	if err := s.switchInstance(name); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, map[string]string{"active_instance": name})
+}
+
+// handleDisconnect reverts to the instance that was active before the last ad-hoc connect.
+func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
+	s.instanceMu.Lock()
+	target := s.prevInstance
+	if target == "" && len(s.cfg.KafkaInstances) > 0 {
+		target = s.cfg.KafkaInstances[0].Name
+	}
+	s.instanceMu.Unlock()
+
+	if target == "" {
+		http.Error(w, "no instance to revert to", http.StatusConflict)
+		return
+	}
+	if err := s.switchInstance(target); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	s.instanceMu.Lock()
+	s.prevInstance = ""
+	s.instanceMu.Unlock()
+
+	writeJSON(w, map[string]string{"active_instance": target})
+}
+
+func splitBrokers(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func (s *Server) handleLoadStart(w http.ResponseWriter, r *http.Request) {

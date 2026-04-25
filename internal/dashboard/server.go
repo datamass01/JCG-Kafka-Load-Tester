@@ -54,6 +54,10 @@ func (s *Server) SetReady(ready bool) {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	s.instanceMu.Lock()
+	s.rootCtx = ctx
+	s.instanceMu.Unlock()
+
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
@@ -68,6 +72,8 @@ func (s *Server) Run(ctx context.Context) error {
 		r.Get("/kafka/brokers", s.handleBrokers)
 		r.Get("/kafka/topics", s.handleTopics)
 		r.Get("/kafka/metrics", s.handleKafkaMetrics)
+		r.Post("/kafka/connect", s.handleConnectBrokers)
+		r.Post("/kafka/disconnect", s.handleDisconnect)
 		r.Post("/load/start", s.handleLoadStart)
 		r.Post("/load/stop", s.handleLoadStop)
 		r.Get("/load/status", s.handleLoadStatus)
@@ -107,6 +113,53 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
+// switchInstance reconnects to the named Kafka instance. Rejected if a load test is running.
+func (s *Server) switchInstance(name string) error {
+	s.instanceMu.Lock()
+	defer s.instanceMu.Unlock()
+
+	if s.producer.IsRunning() {
+		return fmt.Errorf("stop load test before switching instance")
+	}
+
+	inst := s.cfg.FindInstance(name)
+	if inst == nil {
+		return fmt.Errorf("instance %q not found", name)
+	}
+
+	sc, err := kafka.NewSaramaConfig(inst.ToKafkaConfig())
+	if err != nil {
+		return fmt.Errorf("build sarama config: %w", err)
+	}
+
+	newAdmin, err := kafka.NewAdminClient(inst.Brokers, sc)
+	if err != nil {
+		return fmt.Errorf("connect to %q (%v): %w", name, inst.Brokers, err)
+	}
+
+	// Stop old collector goroutine and close old admin.
+	s.collector.Stop()
+	s.admin.Close()
+
+	s.admin = newAdmin
+	s.collector = kafka.NewMetricsCollector(newAdmin, 5*time.Second)
+	s.collector.Start(s.rootCtx)
+
+	if err := s.producer.SetBrokers(inst.Brokers, sc); err != nil {
+		return err
+	}
+
+	s.cfg.ActiveInstance = name
+
+	// Best-effort topic creation on the new instance.
+	if err := newAdmin.EnsureTopic(&s.cfg.LoadTest); err != nil {
+		log.Printf("warn: ensure topic on %q: %v", name, err)
+	}
+
+	s.Log("info", fmt.Sprintf("switched to Kafka instance %q (%v)", name, inst.Brokers))
+	return nil
+}
+
 func (s *Server) broadcastLoop(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -121,19 +174,23 @@ func (s *Server) broadcastLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			snap := s.agg.Snapshot()
-			kafkaM := s.collector.Latest()
+			kafkaM := s.activeCollector().Latest()
 			status := "idle"
 			elapsed := 0.0
 			if s.producer.IsRunning() {
 				status = "running"
 				elapsed = time.Since(s.producer.StartedAt()).Seconds()
 			}
+			s.instanceMu.RLock()
+			activeInst := s.cfg.ActiveInstance
+			s.instanceMu.RUnlock()
 			s.hub.sendJSON(map[string]any{
-				"type":    "update",
-				"status":  status,
-				"elapsed": elapsed,
-				"metrics": snap,
-				"kafka":   kafkaM,
+				"type":            "update",
+				"status":          status,
+				"elapsed":         elapsed,
+				"metrics":         snap,
+				"kafka":           kafkaM,
+				"active_instance": activeInst,
 			})
 		}
 	}
@@ -167,18 +224,18 @@ func (s *Server) runSaver(ctx context.Context) {
 					avgMBSec = float64(snap.TotalBytesSent) / dur / 1024 / 1024
 				}
 				record := storage.RunRecord{
-					ID:           fmt.Sprintf("%d", s.producer.StartedAt().UnixNano()),
-					StartedAt:    s.producer.StartedAt(),
-					StoppedAt:    time.Now(),
-					Topic:        s.cfg.LoadTest.Topic,
-					Workers:      s.cfg.LoadTest.Workers,
-					TargetMsgSec: s.cfg.LoadTest.TargetMsgPerSec,
-					MsgSizeBytes: s.cfg.LoadTest.MessageSizeBytes,
-					TotalSent:    snap.TotalMessagesSent,
-					TotalErrors:  snap.TotalErrors,
-					TotalBytes:   snap.TotalBytesSent,
-					AvgMsgPerSec: avgMsgSec,
-					AvgMBPerSec:  avgMBSec,
+					ID:            fmt.Sprintf("%d", s.producer.StartedAt().UnixNano()),
+					StartedAt:     s.producer.StartedAt(),
+					StoppedAt:     time.Now(),
+					Topic:         s.cfg.LoadTest.Topic,
+					Workers:       s.cfg.LoadTest.Workers,
+					TargetMsgSec:  s.cfg.LoadTest.TargetMsgPerSec,
+					MsgSizeBytes:  s.cfg.LoadTest.MessageSizeBytes,
+					TotalSent:     snap.TotalMessagesSent,
+					TotalErrors:   snap.TotalErrors,
+					TotalBytes:    snap.TotalBytesSent,
+					AvgMsgPerSec:  avgMsgSec,
+					AvgMBPerSec:   avgMBSec,
 					AvgLatencyP99: snap.LatencyP99Ms,
 				}
 				if err := s.store.SaveRun(record); err != nil {

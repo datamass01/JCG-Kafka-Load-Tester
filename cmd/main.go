@@ -30,13 +30,14 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	sc, err := kafka.NewSaramaConfig(&cfg.Kafka)
+	inst := cfg.ActiveKafkaInstance()
+	sc, err := kafka.NewSaramaConfig(inst.ToKafkaConfig())
 	if err != nil {
 		log.Fatalf("build sarama config: %v", err)
 	}
 
-	log.Printf("connecting to kafka: %v", cfg.Kafka.Brokers)
-	admin, err := kafka.NewAdminClient(cfg.Kafka.Brokers, sc)
+	log.Printf("connecting to kafka instance %q: %v", inst.Name, inst.Brokers)
+	admin, err := kafka.NewAdminClient(inst.Brokers, sc)
 	if err != nil {
 		log.Fatalf("kafka admin client: %v", err)
 	}
@@ -53,7 +54,7 @@ func main() {
 	defer store.Close()
 
 	agg := metrics.NewAggregator()
-	producer := kafka.NewProducer(cfg.Kafka.Brokers, sc, &cfg.LoadTest, agg)
+	producer := kafka.NewProducer(inst.Brokers, sc, &cfg.LoadTest, agg)
 	collector := kafka.NewMetricsCollector(admin, 5*time.Second)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

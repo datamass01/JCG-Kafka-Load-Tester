@@ -29,7 +29,7 @@ internal/config/config.go       # YAML + env var config loader
 internal/kafka/
   client.go                     # Sarama config factory (TLS, SASL/PLAIN/SCRAM)
   scram.go                      # SCRAM-SHA-256/512 client implementation
-  admin.go                      # Broker/topic discovery, topic auto-creation
+  admin.go                      # DescribeCluster (full node list), topic discovery, topic auto-creation
   producer.go                   # AsyncProducer-based load generator (worker pool)
   metrics_collector.go          # Polls Kafka metadata every 5s
 internal/metrics/
@@ -80,6 +80,8 @@ Config is loaded from a YAML file and overridden by environment variables. All `
 | GET | `/api/kafka/brokers` | Broker list |
 | GET | `/api/kafka/topics` | Topic list with partition offsets |
 | GET | `/api/kafka/metrics` | Combined Kafka health snapshot |
+| POST | `/api/kafka/connect` | Connect to brokers (`{"brokers":"host:port,…"}`); registers as new instance if unknown |
+| POST | `/api/kafka/disconnect` | Revert to the instance that was active before the last ad-hoc connect |
 | POST | `/api/load/start` | Start load test |
 | POST | `/api/load/stop` | Stop load test |
 | GET | `/api/load/status` | Current test state + metrics |
@@ -90,7 +92,7 @@ Config is loaded from a YAML file and overridden by environment variables. All `
 ## WebSocket Message Types
 
 ```json
-{ "type": "update", "status": "running|idle", "elapsed": 12.3, "metrics": {...}, "kafka": {...} }
+{ "type": "update", "status": "running|idle", "elapsed": 12.3, "metrics": {...}, "kafka": {...}, "active_instance": "kafka-1" }
 { "type": "log", "level": "info|success|warn|error", "message": "...", "ts": "..." }
 ```
 
@@ -101,6 +103,19 @@ Uses a single `sarama.AsyncProducer` shared across all worker goroutines. Worker
 - `RequiredAcks = WaitForLocal` — compatible with single-broker dev clusters
 - `Compression = None` — avoids codec edge cases in minimal containers
 - Rate limiting: per-worker `time.Ticker` with interval = `1s / (targetRate / workers)`
+- Producer is built on top of an explicit `sarama.Client`; `RefreshMetadata` is called before each test starts so a fresh run sees the current leader (not stale post-failover metadata)
+- Retry window: 90 retries × 1 s = 90 s — wide enough to outlast a worst-case KRaft leader election
+- Net `DialTimeout`/`ReadTimeout`/`WriteTimeout` = 10 s so a dead broker cannot wedge a goroutine
+- `leader not available` errors are rate-limited to one log line every 5 s and trigger an asynchronous metadata refresh
+- `ErrLeaderNotAvailable`, `ErrNotLeaderForPartition`, `ErrBrokerNotAvailable`, `ErrNetworkException` are all treated as the same recoverable category
+
+## Failover Behavior
+
+Topic must be created with `replication_factor ≥ 2` to survive a node loss. With RF=1, each partition lives on a single broker — killing that broker leaves the partition permanently leaderless and writes hang indefinitely. `EnsureTopic` refuses to start if the existing topic has RF<2 and prints a clear error directing the operator to delete the topic (or volume) so it can be recreated.
+
+Default load-test topic configuration: `replication_factor=3`, `min.insync.replicas=2` — tolerates one node failure while maintaining a write quorum. After a `docker stop kafka` (leader broker), surviving brokers elect a new leader from in-sync replicas in seconds and writes resume automatically.
+
+To recreate the topic with new RF settings: `docker compose down -v && docker compose up --build` (the `-v` removes the data volume so the old RF=1 topic is gone).
 
 ## Storage
 
@@ -110,8 +125,10 @@ Run records are appended as newline-delimited JSON to `/data/runs.jsonl`. Files 
 
 - **Host port**: `8093` → container port `8080`
 - **Kafka image**: `apache/kafka:3.8.0` (KRaft mode, no Zookeeper)
-- Kafka internal listener: `kafka:9092` (used by the agent)
-- Kafka host listener: `localhost:9094` (for external tools)
+- Single three-node KRaft cluster: node-1 (`kafka`, host port `9094`), node-2 (`kafka2`, host port `9095`), node-3 (`kafka3`, host port `9096`) — all share the same `CLUSTER_ID` and list all three in `KAFKA_CONTROLLER_QUORUM_VOTERS`
+- All nodes configured with `REPLICATION_FACTOR=3`, `MIN_ISR=2` — tolerates one node failure while maintaining a write quorum
+- All Kafka nodes have `restart: unless-stopped` so a killed node respawns automatically (only effective for `docker stop`/`kill`; `docker rm` requires `docker compose up -d <name>` to recreate)
+- kafka-agent waits for all three nodes to be healthy before starting; bootstrap lists all three brokers
 - Multi-stage build: `golang:1.26-alpine` builder → `distroless/static-debian12` runtime
 - Non-root user (`nonroot:nonroot`) in the final image
 
@@ -134,7 +151,8 @@ kubectl apply -f k8s/service.yaml
 
 ## Dashboard Features
 
-- **Kafka Health**: broker connection status, topic list with partition counts and total offsets
+- **Kafka Health**: all cluster nodes sourced via `DescribeCluster` (not just bootstrap brokers); each node shown as a chip with its node ID (`node-<id>`), a yellow **leader** badge on the controller node, address, and live connection status (green ✓ / red ✗); topic list with partition counts and total offsets
+- **Instance Connector**: free-text broker input (`host:port,…`) with a Connect button; on success shows a green connected chip with the broker address and a disconnect (×) button that reverts to the previously active configured instance
 - **Load Test Controls**: topic, workers, msg/sec target, message size, duration, key strategy
 - **Event Log**: scrollable CLI-style log with timestamps; shows start/stop banners, broker state changes, errors, and server-side log events streamed via WebSocket
 - **Performance Stats**: 8 live stat cards (messages sent, msg/sec, MB/sec, errors, error %, p50/p95/p99 latency)

@@ -6,14 +6,16 @@ metadata:
     app: kafka-agent
 data:
   config.yaml: |
-    kafka:
-      brokers:
-        - "kafka-broker:9092"
-      sasl:
-        enabled: false
-      tls:
-        enabled: false
-      version: "3.6.0"
+    kafka_instances:
+      - name: "kafka-broker"
+        brokers:
+          - "kafka-broker:9092"
+        sasl:
+          enabled: false
+        tls:
+          enabled: false
+        version: "3.6.0"
+    active_instance: "kafka-broker"
     load_test:
       topic: "load-test"
       partitions: 3

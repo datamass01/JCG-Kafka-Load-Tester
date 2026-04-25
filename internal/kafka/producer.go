@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -19,15 +20,18 @@ type LogSink interface {
 }
 
 type Producer struct {
-	cfg       *config.LoadTestConfig
-	brokers   []string
-	saramaCfg *sarama.Config
-	agg       *metrics.Aggregator
-	sink      LogSink
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	running   atomic.Bool
-	startedAt time.Time
+	cfg          *config.LoadTestConfig
+	brokers      []string
+	saramaCfg    *sarama.Config
+	agg          *metrics.Aggregator
+	sink         LogSink
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	running      atomic.Bool
+	startedAt    time.Time
+	asyncProd    sarama.AsyncProducer
+	client       sarama.Client
+	lastLeaderLog atomic.Int64 // unix-nano timestamp of last "leader not available" log
 }
 
 func NewProducer(brokers []string, sc *sarama.Config, cfg *config.LoadTestConfig, agg *metrics.Aggregator) *Producer {
@@ -78,12 +82,30 @@ func (p *Producer) Start(ctx context.Context) error {
 	producerCfg.Producer.Flush.Messages = 100
 
 	p.logf("info", "creating async producer (brokers=%v topic=%s)", p.brokers, p.cfg.Topic)
-	asyncProd, err := sarama.NewAsyncProducer(p.brokers, &producerCfg)
+
+	// Build the producer on top of an explicit client so we can force a
+	// metadata refresh before sending. This ensures a freshly started test
+	// targets the current leader, not stale metadata cached from a previous
+	// test that may have ended during a failover.
+	client, err := sarama.NewClient(p.brokers, &producerCfg)
 	if err != nil {
+		p.running.Store(false)
+		p.logf("error", "create kafka client: %v", err)
+		return fmt.Errorf("create client: %w", err)
+	}
+	if err := client.RefreshMetadata(p.cfg.Topic); err != nil {
+		p.logf("warn", "metadata refresh on start: %v (continuing)", err)
+	}
+	asyncProd, err := sarama.NewAsyncProducerFromClient(client)
+	if err != nil {
+		client.Close()
 		p.running.Store(false)
 		p.logf("error", "create producer: %v", err)
 		return fmt.Errorf("create producer: %w", err)
 	}
+	p.client = client
+	p.asyncProd = asyncProd
+	p.lastLeaderLog.Store(0)
 	p.logf("success", "producer connected — launching %d workers at %d msg/s target", p.cfg.Workers, p.cfg.TargetMsgPerSec)
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -113,11 +135,15 @@ func (p *Producer) Start(ctx context.Context) error {
 		defer recoverPanic(p, "shutdown goroutine")
 		<-runCtx.Done()
 		p.logf("info", "stop signal received — draining producer")
-		if err := asyncProd.Close(); err != nil {
-			p.logf("error", "producer close: %v", err)
-		}
+		// AsyncClose signals the producer to flush without blocking. The existing
+		// collector goroutines drain Successes/Errors until the channels close.
+		asyncProd.AsyncClose()
 		p.wg.Wait()
-		p.running.Store(false)
+		if p.client != nil {
+			p.client.Close()
+			p.client = nil
+		}
+		p.asyncProd = nil
 		p.agg.MarkStopped()
 		p.logf("info", "load test fully stopped")
 	}()
@@ -126,6 +152,9 @@ func (p *Producer) Start(ctx context.Context) error {
 }
 
 func (p *Producer) Stop() {
+	// Mark stopped immediately so the UI reflects the change without waiting
+	// for the producer to finish flushing (which blocks when a broker is down).
+	p.running.Store(false)
 	if p.cancel != nil {
 		p.cancel()
 	}
@@ -137,6 +166,17 @@ func (p *Producer) IsRunning() bool {
 
 func (p *Producer) StartedAt() time.Time {
 	return p.startedAt
+}
+
+// SetBrokers updates the target broker list and sarama config.
+// Returns an error if a load test is currently running.
+func (p *Producer) SetBrokers(brokers []string, sc *sarama.Config) error {
+	if p.running.Load() {
+		return fmt.Errorf("cannot change brokers while load test is running")
+	}
+	p.brokers = brokers
+	p.saramaCfg = sc
+	return nil
 }
 
 func (p *Producer) runWorker(ctx context.Context, asyncProd sarama.AsyncProducer, interval time.Duration) {
@@ -184,8 +224,39 @@ func (p *Producer) collectErrors(asyncProd sarama.AsyncProducer) {
 	defer p.wg.Done()
 	defer recoverPanic(p, "error collector")
 	for e := range asyncProd.Errors() {
+		if isLeaderNotAvailable(e.Err) {
+			// Sarama already exhausted all retries — election is taking longer
+			// than the retry window. Rate-limit the user-facing log to one
+			// message every 5 seconds so the event log stays readable, and
+			// kick off a metadata refresh so the new leader is picked up the
+			// moment the election completes.
+			now := time.Now().UnixNano()
+			last := p.lastLeaderLog.Load()
+			if now-last > int64(5*time.Second) {
+				if p.lastLeaderLog.CompareAndSwap(last, now) {
+					p.logf("warn", "leader not available — Kafka leader election in progress; will recover automatically")
+					if p.client != nil {
+						go func() {
+							defer recoverPanic(p, "metadata refresh")
+							_ = p.client.RefreshMetadata()
+						}()
+					}
+				}
+			}
+		}
 		p.agg.RecordError(e.Err)
 	}
+}
+
+func isLeaderNotAvailable(err error) bool {
+	var kErr sarama.KError
+	if errors.As(err, &kErr) {
+		return kErr == sarama.ErrLeaderNotAvailable ||
+			kErr == sarama.ErrNotLeaderForPartition ||
+			kErr == sarama.ErrBrokerNotAvailable ||
+			kErr == sarama.ErrNetworkException
+	}
+	return false
 }
 
 func recoverPanic(p *Producer, where string) {

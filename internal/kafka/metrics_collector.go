@@ -20,6 +20,7 @@ type MetricsCollector struct {
 	interval time.Duration
 	mu       sync.RWMutex
 	latest   *KafkaMetrics
+	stopFn   context.CancelFunc
 }
 
 func NewMetricsCollector(admin *AdminClient, interval time.Duration) *MetricsCollector {
@@ -31,19 +32,28 @@ func NewMetricsCollector(admin *AdminClient, interval time.Duration) *MetricsCol
 }
 
 func (mc *MetricsCollector) Start(ctx context.Context) {
+	innerCtx, cancel := context.WithCancel(ctx)
+	mc.stopFn = cancel
 	mc.collect()
 	ticker := time.NewTicker(mc.interval)
 	go func() {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-innerCtx.Done():
 				return
 			case <-ticker.C:
 				mc.collect()
 			}
 		}
 	}()
+}
+
+// Stop cancels the polling goroutine started by Start.
+func (mc *MetricsCollector) Stop() {
+	if mc.stopFn != nil {
+		mc.stopFn()
+	}
 }
 
 func (mc *MetricsCollector) Latest() *KafkaMetrics {
@@ -56,6 +66,11 @@ func (mc *MetricsCollector) collect() {
 	m := &KafkaMetrics{CollectedAt: time.Now()}
 
 	brokers, err := mc.admin.ListBrokers()
+	if err != nil {
+		// Refresh metadata so the client re-discovers live brokers, then retry once.
+		mc.admin.Refresh()
+		brokers, err = mc.admin.ListBrokers()
+	}
 	if err != nil {
 		m.CollectionError = err.Error()
 	} else {
