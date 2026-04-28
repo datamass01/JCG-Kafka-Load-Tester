@@ -14,6 +14,7 @@ type Config struct {
 	ActiveInstance string                `yaml:"active_instance" json:"active_instance"`
 	Kafka          KafkaConfig           `yaml:"kafka"           json:"kafka"` // legacy single-instance
 	LoadTest       LoadTestConfig        `yaml:"load_test"       json:"load_test"`
+	ConsumerTest   ConsumerTestConfig    `yaml:"consumer_test"   json:"consumer_test"`
 	Dashboard      DashboardConfig       `yaml:"dashboard"       json:"dashboard"`
 	Storage        StorageConfig         `yaml:"storage"         json:"storage"`
 }
@@ -71,6 +72,13 @@ type LoadTestConfig struct {
 	DurationSeconds   int    `yaml:"duration_seconds"    json:"duration_seconds"`
 	KeyStrategy       string `yaml:"key_strategy"        json:"key_strategy"`
 	ValueStrategy     string `yaml:"value_strategy"      json:"value_strategy"`
+}
+
+type ConsumerTestConfig struct {
+	Topic           string `yaml:"topic"            json:"topic"`
+	ConsumerGroup   string `yaml:"consumer_group"   json:"consumer_group"`
+	DurationSeconds int    `yaml:"duration_seconds" json:"duration_seconds"`
+	OffsetReset     string `yaml:"offset_reset"     json:"offset_reset"`
 }
 
 type DashboardConfig struct {
@@ -151,6 +159,12 @@ func defaults() *Config {
 			DurationSeconds:   0,
 			KeyStrategy:       "random",
 			ValueStrategy:     "random",
+		},
+		ConsumerTest: ConsumerTestConfig{
+			Topic:           "load-test",
+			ConsumerGroup:   "kafka-load-test",
+			DurationSeconds: 0,
+			OffsetReset:     "latest",
 		},
 		Dashboard: DashboardConfig{
 			Host: "0.0.0.0",

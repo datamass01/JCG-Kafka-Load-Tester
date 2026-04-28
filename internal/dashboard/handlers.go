@@ -24,6 +24,7 @@ type Server struct {
 	cfg          *config.Config
 	admin        *kafka.AdminClient
 	producer     *kafka.Producer
+	consumer     *kafka.Consumer
 	collector    *kafka.MetricsCollector
 	agg          *metrics.Aggregator
 	store        *storage.Store
@@ -85,7 +86,6 @@ func (s *Server) handleTopics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleKafkaMetrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.activeCollector().Latest())
 }
-
 
 // handleConnectBrokers accepts a comma-separated broker string, registers it as an
 // ad-hoc instance if not already known, and makes it the active instance.
@@ -214,6 +214,16 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, runs)
 }
 
+func (s *Server) handleConsumerHistory(w http.ResponseWriter, r *http.Request) {
+	since := time.Now().Add(-time.Duration(s.cfg.Storage.MetricsRetentionHours) * time.Hour)
+	runs, err := s.store.ListConsumerRuns(since)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, runs)
+}
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -223,6 +233,53 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.hub.register <- client
 	go client.writePump()
 	go client.readPump()
+}
+
+func (s *Server) handleConsumerStart(w http.ResponseWriter, r *http.Request) {
+	s.Log("info", fmt.Sprintf("/api/load/consumer/start called (topic=%s group=%s)",
+		s.cfg.ConsumerTest.Topic, s.cfg.ConsumerTest.ConsumerGroup))
+	if err := s.consumer.Start(context.Background()); err != nil {
+		s.Log("error", fmt.Sprintf("consumer start rejected: %v", err))
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "started"})
+}
+
+func (s *Server) handleConsumerStop(w http.ResponseWriter, r *http.Request) {
+	s.Log("info", "/api/load/consumer/stop called")
+	s.consumer.Stop()
+	writeJSON(w, map[string]string{"status": "stopped"})
+}
+
+func (s *Server) handleConsumerStatus(w http.ResponseWriter, r *http.Request) {
+	snap := s.consumer.Snapshot()
+	status := "idle"
+	elapsed := 0.0
+	if s.consumer.IsRunning() {
+		status = "running"
+		elapsed = time.Since(s.consumer.StartedAt()).Seconds()
+	}
+	writeJSON(w, map[string]any{
+		"status":  status,
+		"elapsed": elapsed,
+		"config":  s.cfg.ConsumerTest,
+		"metrics": snap,
+	})
+}
+
+func (s *Server) handleUpdateConsumerConfig(w http.ResponseWriter, r *http.Request) {
+	if s.consumer.IsRunning() {
+		http.Error(w, "stop consumer before changing config", http.StatusConflict)
+		return
+	}
+	var patch config.ConsumerTestConfig
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.cfg.ConsumerTest = patch
+	writeJSON(w, s.cfg.ConsumerTest)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -55,6 +55,10 @@ func main() {
 
 	agg := metrics.NewAggregator()
 	producer := kafka.NewProducer(inst.Brokers, sc, &cfg.LoadTest, agg)
+
+	consumerAgg := metrics.NewAggregator()
+	consumer := kafka.NewConsumer(inst.Brokers, sc, &cfg.ConsumerTest, consumerAgg)
+
 	collector := kafka.NewMetricsCollector(admin, 5*time.Second)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -62,7 +66,7 @@ func main() {
 
 	collector.Start(ctx)
 
-	srv := dashboard.NewServer(cfg, admin, producer, collector, agg, store)
+	srv := dashboard.NewServer(cfg, admin, producer, consumer, collector, agg, store)
 	srv.SetReady(true)
 
 	if err := srv.Run(ctx); err != nil {

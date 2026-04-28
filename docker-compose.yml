@@ -82,8 +82,8 @@ services:
     ports:
       - "8093:8080"
     volumes:
-      - ./data:/data
-      - ./config/config.yaml:/etc/kafka-agent/config.yaml:ro
+      - kafka-agent-data:/data
+      - ./config/config.yaml:/etc/kafka-agent/config.yaml:ro,z
     environment:
       DATA_DIR: "/data"
     depends_on:
@@ -94,3 +94,6 @@ services:
       kafka3:
         condition: service_healthy
     restart: on-failure
+
+volumes:
+  kafka-agent-data:

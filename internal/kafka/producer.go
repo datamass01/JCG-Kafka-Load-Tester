@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -25,6 +26,7 @@ type Producer struct {
 	saramaCfg    *sarama.Config
 	agg          *metrics.Aggregator
 	sink         LogSink
+	onStop       func(startedAt, stoppedAt time.Time)
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
 	running      atomic.Bool
@@ -45,6 +47,11 @@ func NewProducer(brokers []string, sc *sarama.Config, cfg *config.LoadTestConfig
 
 func (p *Producer) SetLogSink(sink LogSink) {
 	p.sink = sink
+}
+
+// SetOnStop registers a callback fired once after the producer has fully drained.
+func (p *Producer) SetOnStop(fn func(startedAt, stoppedAt time.Time)) {
+	p.onStop = fn
 }
 
 func (p *Producer) logf(level, format string, args ...any) {
@@ -145,7 +152,11 @@ func (p *Producer) Start(ctx context.Context) error {
 		}
 		p.asyncProd = nil
 		p.agg.MarkStopped()
+		p.running.Store(false) // covers duration-based stop where Stop() was never called
 		p.logf("info", "load test fully stopped")
+		if p.onStop != nil {
+			p.onStop(p.startedAt, time.Now())
+		}
 	}()
 
 	return nil
@@ -193,8 +204,9 @@ func (p *Producer) runWorker(ctx context.Context, asyncProd sarama.AsyncProducer
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			msg := p.buildMessage()
-			msg.Metadata = time.Now()
+			now := time.Now()
+			msg := p.buildMessage(now)
+			msg.Metadata = now
 			select {
 			case input <- msg:
 			case <-ctx.Done():
@@ -272,11 +284,11 @@ func recoverPanic(p *Producer, where string) {
 	}
 }
 
-func (p *Producer) buildMessage() *sarama.ProducerMessage {
+func (p *Producer) buildMessage(now time.Time) *sarama.ProducerMessage {
 	return &sarama.ProducerMessage{
 		Topic: p.cfg.Topic,
 		Key:   sarama.ByteEncoder(p.generateKey()),
-		Value: sarama.ByteEncoder(p.generateValue()),
+		Value: sarama.ByteEncoder(p.generateValue(now)),
 	}
 }
 
@@ -293,21 +305,21 @@ func (p *Producer) generateKey() []byte {
 	}
 }
 
-func (p *Producer) generateValue() []byte {
+func (p *Producer) generateValue(now time.Time) []byte {
 	size := p.cfg.MessageSizeBytes
-	if size <= 0 {
-		size = 1024
+	if size < 8 {
+		size = 8 // ensure room for the embedded timestamp
 	}
+	b := make([]byte, size)
+	// First 8 bytes: send timestamp as big-endian int64 nanoseconds (read by consumer for E2E latency)
+	binary.BigEndian.PutUint64(b[:8], uint64(now.UnixNano()))
 	switch p.cfg.ValueStrategy {
 	case "random":
-		b := make([]byte, size)
-		rand.Read(b)
-		return b
+		rand.Read(b[8:])
 	default:
-		b := make([]byte, size)
-		for i := range b {
+		for i := 8; i < len(b); i++ {
 			b[i] = byte('A' + (i % 26))
 		}
-		return b
 	}
+	return b
 }

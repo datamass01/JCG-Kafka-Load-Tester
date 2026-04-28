@@ -20,6 +20,7 @@ func NewServer(
 	cfg *config.Config,
 	admin *kafka.AdminClient,
 	producer *kafka.Producer,
+	consumer *kafka.Consumer,
 	collector *kafka.MetricsCollector,
 	agg *metrics.Aggregator,
 	store *storage.Store,
@@ -30,13 +31,90 @@ func NewServer(
 		cfg:       cfg,
 		admin:     admin,
 		producer:  producer,
+		consumer:  consumer,
 		collector: collector,
 		agg:       agg,
 		store:     store,
 		hub:       hub,
 	}
 	producer.SetLogSink(s)
+	consumer.SetLogSink(s)
+	producer.SetOnStop(s.saveRun)
+	consumer.SetOnStop(s.saveConsumerRun)
 	return s
+}
+
+// saveRun persists a completed producer run and notifies clients. Called by the
+// producer once it has fully drained, so no polling is required.
+func (s *Server) saveRun(startedAt, stoppedAt time.Time) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("saveRun panic: %v", r)
+		}
+	}()
+	snap := s.agg.Snapshot()
+	dur := stoppedAt.Sub(startedAt).Seconds()
+	avgMsgSec := 0.0
+	avgMBSec := 0.0
+	if dur > 0 {
+		avgMsgSec = float64(snap.TotalMessagesSent) / dur
+		avgMBSec = float64(snap.TotalBytesSent) / dur / 1024 / 1024
+	}
+	record := storage.RunRecord{
+		ID:            fmt.Sprintf("%d", startedAt.UnixNano()),
+		StartedAt:     startedAt,
+		StoppedAt:     stoppedAt,
+		Topic:         s.cfg.LoadTest.Topic,
+		Workers:       s.cfg.LoadTest.Workers,
+		TargetMsgSec:  s.cfg.LoadTest.TargetMsgPerSec,
+		MsgSizeBytes:  s.cfg.LoadTest.MessageSizeBytes,
+		TotalSent:     snap.TotalMessagesSent,
+		TotalErrors:   snap.TotalErrors,
+		TotalBytes:    snap.TotalBytesSent,
+		AvgMsgPerSec:  avgMsgSec,
+		AvgMBPerSec:   avgMBSec,
+		AvgLatencyP99: snap.LatencyP99Ms,
+	}
+	if err := s.store.SaveRun(record); err != nil {
+		log.Printf("save run: %v", err)
+		return
+	}
+	s.hub.sendJSON(map[string]any{"type": "run_completed"})
+}
+
+func (s *Server) saveConsumerRun(startedAt, stoppedAt time.Time) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("saveConsumerRun panic: %v", r)
+		}
+	}()
+	snap := s.consumer.Snapshot()
+	dur := stoppedAt.Sub(startedAt).Seconds()
+	avgMsgSec := 0.0
+	avgMBSec := 0.0
+	if dur > 0 {
+		avgMsgSec = float64(snap.TotalMessagesConsumed) / dur
+		avgMBSec = float64(snap.TotalBytesConsumed) / dur / 1024 / 1024
+	}
+	record := storage.ConsumerRunRecord{
+		ID:            fmt.Sprintf("%d", startedAt.UnixNano()),
+		StartedAt:     startedAt,
+		StoppedAt:     stoppedAt,
+		Topic:         s.cfg.ConsumerTest.Topic,
+		ConsumerGroup: s.cfg.ConsumerTest.ConsumerGroup,
+		OffsetReset:   s.cfg.ConsumerTest.OffsetReset,
+		TotalConsumed: snap.TotalMessagesConsumed,
+		TotalErrors:   snap.TotalErrors,
+		TotalBytes:    snap.TotalBytesConsumed,
+		AvgMsgPerSec:  avgMsgSec,
+		AvgMBPerSec:   avgMBSec,
+		AvgLatencyP99: snap.LatencyP99Ms,
+	}
+	if err := s.store.SaveConsumerRun(record); err != nil {
+		log.Printf("save consumer run: %v", err)
+		return
+	}
+	s.hub.sendJSON(map[string]any{"type": "consumer_run_completed"})
 }
 
 // Log satisfies kafka.LogSink — broadcasts a server-side log line to all WS clients.
@@ -77,8 +155,13 @@ func (s *Server) Run(ctx context.Context) error {
 		r.Post("/load/start", s.handleLoadStart)
 		r.Post("/load/stop", s.handleLoadStop)
 		r.Get("/load/status", s.handleLoadStatus)
+		r.Post("/load/consumer/start", s.handleConsumerStart)
+		r.Post("/load/consumer/stop", s.handleConsumerStop)
+		r.Get("/load/consumer/status", s.handleConsumerStatus)
+		r.Put("/consumer/config", s.handleUpdateConsumerConfig)
 		r.Get("/metrics/current", s.handleCurrentMetrics)
 		r.Get("/metrics/history", s.handleHistory)
+		r.Get("/metrics/consumer/history", s.handleConsumerHistory)
 	})
 
 	r.Get("/ws/metrics", s.handleWS)
@@ -88,9 +171,6 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Broadcast metrics every second
 	go s.broadcastLoop(ctx)
-
-	// Auto-save completed runs
-	go s.runSaver(ctx)
 
 	addr := fmt.Sprintf("%s:%d", s.cfg.Dashboard.Host, s.cfg.Dashboard.Port)
 	log.Printf("dashboard listening on http://%s", addr)
@@ -118,7 +198,7 @@ func (s *Server) switchInstance(name string) error {
 	s.instanceMu.Lock()
 	defer s.instanceMu.Unlock()
 
-	if s.producer.IsRunning() {
+	if s.producer.IsRunning() || s.consumer.IsRunning() {
 		return fmt.Errorf("stop load test before switching instance")
 	}
 
@@ -148,6 +228,9 @@ func (s *Server) switchInstance(name string) error {
 	if err := s.producer.SetBrokers(inst.Brokers, sc); err != nil {
 		return err
 	}
+	if err := s.consumer.SetBrokers(inst.Brokers, sc); err != nil {
+		return err
+	}
 
 	s.cfg.ActiveInstance = name
 
@@ -174,6 +257,7 @@ func (s *Server) broadcastLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			snap := s.agg.Snapshot()
+			consumerSnap := s.consumer.Snapshot()
 			kafkaM := s.activeCollector().Latest()
 			status := "idle"
 			elapsed := 0.0
@@ -181,68 +265,26 @@ func (s *Server) broadcastLoop(ctx context.Context) {
 				status = "running"
 				elapsed = time.Since(s.producer.StartedAt()).Seconds()
 			}
+			consumerStatus := "idle"
+			consumerElapsed := 0.0
+			if s.consumer.IsRunning() {
+				consumerStatus = "running"
+				consumerElapsed = time.Since(s.consumer.StartedAt()).Seconds()
+			}
 			s.instanceMu.RLock()
 			activeInst := s.cfg.ActiveInstance
 			s.instanceMu.RUnlock()
 			s.hub.sendJSON(map[string]any{
-				"type":            "update",
-				"status":          status,
-				"elapsed":         elapsed,
-				"metrics":         snap,
-				"kafka":           kafkaM,
-				"active_instance": activeInst,
+				"type":             "update",
+				"status":           status,
+				"elapsed":          elapsed,
+				"metrics":          snap,
+				"consumer_status":  consumerStatus,
+				"consumer_elapsed": consumerElapsed,
+				"consumer_metrics": consumerSnap,
+				"kafka":            kafkaM,
+				"active_instance":  activeInst,
 			})
-		}
-	}
-}
-
-func (s *Server) runSaver(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("runSaver panic: %v", r)
-		}
-	}()
-	var wasRunning bool
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			isRunning := s.producer.IsRunning()
-			if wasRunning && !isRunning {
-				// Just stopped — save the run
-				snap := s.agg.Snapshot()
-				dur := time.Since(s.producer.StartedAt()).Seconds()
-				avgMsgSec := 0.0
-				if dur > 0 {
-					avgMsgSec = float64(snap.TotalMessagesSent) / dur
-				}
-				avgMBSec := 0.0
-				if dur > 0 {
-					avgMBSec = float64(snap.TotalBytesSent) / dur / 1024 / 1024
-				}
-				record := storage.RunRecord{
-					ID:            fmt.Sprintf("%d", s.producer.StartedAt().UnixNano()),
-					StartedAt:     s.producer.StartedAt(),
-					StoppedAt:     time.Now(),
-					Topic:         s.cfg.LoadTest.Topic,
-					Workers:       s.cfg.LoadTest.Workers,
-					TargetMsgSec:  s.cfg.LoadTest.TargetMsgPerSec,
-					MsgSizeBytes:  s.cfg.LoadTest.MessageSizeBytes,
-					TotalSent:     snap.TotalMessagesSent,
-					TotalErrors:   snap.TotalErrors,
-					TotalBytes:    snap.TotalBytesSent,
-					AvgMsgPerSec:  avgMsgSec,
-					AvgMBPerSec:   avgMBSec,
-					AvgLatencyP99: snap.LatencyP99Ms,
-				}
-				if err := s.store.SaveRun(record); err != nil {
-					log.Printf("save run: %v", err)
-				}
-			}
-			wasRunning = isRunning
 		}
 	}
 }

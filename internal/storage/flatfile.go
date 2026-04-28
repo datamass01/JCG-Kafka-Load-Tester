@@ -25,11 +25,27 @@ type RunRecord struct {
 	AvgLatencyP99 float64   `json:"avg_latency_p99_ms"`
 }
 
+type ConsumerRunRecord struct {
+	ID            string    `json:"id"`
+	StartedAt     time.Time `json:"started_at"`
+	StoppedAt     time.Time `json:"stopped_at"`
+	Topic         string    `json:"topic"`
+	ConsumerGroup string    `json:"consumer_group"`
+	OffsetReset   string    `json:"offset_reset"`
+	TotalConsumed int64     `json:"total_messages_consumed"`
+	TotalErrors   int64     `json:"total_errors"`
+	TotalBytes    int64     `json:"total_bytes_consumed"`
+	AvgMsgPerSec  float64   `json:"avg_msg_per_sec"`
+	AvgMBPerSec   float64   `json:"avg_mb_per_sec"`
+	AvgLatencyP99 float64   `json:"avg_latency_p99_ms"`
+}
+
 type Store struct {
 	dataDir        string
 	rotationSizeMB int
 	mu             sync.Mutex
 	currentFile    *os.File
+	consumerFile   *os.File
 }
 
 func NewStore(dataDir string, rotationSizeMB int) (*Store, error) {
@@ -38,6 +54,9 @@ func NewStore(dataDir string, rotationSizeMB int) (*Store, error) {
 	}
 	s := &Store{dataDir: dataDir, rotationSizeMB: rotationSizeMB}
 	if err := s.openFile(); err != nil {
+		return nil, err
+	}
+	if err := s.openConsumerFile(); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -59,11 +78,25 @@ func (s *Store) SaveRun(r RunRecord) error {
 	return err
 }
 
+func (s *Store) SaveConsumerRun(r ConsumerRunRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := json.Marshal(r)
+	if err != nil {
+		return fmt.Errorf("marshal consumer run: %w", err)
+	}
+	_, err = fmt.Fprintf(s.consumerFile, "%s\n", data)
+	return err
+}
+
 func (s *Store) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.currentFile != nil {
 		s.currentFile.Close()
+	}
+	if s.consumerFile != nil {
+		s.consumerFile.Close()
 	}
 }
 
@@ -77,6 +110,19 @@ func (s *Store) openFile() error {
 		s.currentFile.Close()
 	}
 	s.currentFile = f
+	return nil
+}
+
+func (s *Store) openConsumerFile() error {
+	name := filepath.Join(s.dataDir, "consumer_runs.jsonl")
+	f, err := os.OpenFile(name, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("open consumer runs file: %w", err)
+	}
+	if s.consumerFile != nil {
+		s.consumerFile.Close()
+	}
+	s.consumerFile = f
 	return nil
 }
 
