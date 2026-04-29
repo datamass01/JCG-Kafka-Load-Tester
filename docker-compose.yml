@@ -86,6 +86,7 @@ services:
       - ./config/config.yaml:/etc/kafka-agent/config.yaml:ro,z
     environment:
       DATA_DIR: "/data"
+      DASHBOARD_ALLOW_PRIVATE_BROKERS: "true"
     depends_on:
       kafka:
         condition: service_healthy

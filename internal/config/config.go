@@ -17,6 +17,62 @@ type Config struct {
 	ConsumerTest   ConsumerTestConfig    `yaml:"consumer_test"   json:"consumer_test"`
 	Dashboard      DashboardConfig       `yaml:"dashboard"       json:"dashboard"`
 	Storage        StorageConfig         `yaml:"storage"         json:"storage"`
+	Security       SecurityConfig        `yaml:"security"        json:"-"`
+}
+
+// SecurityConfig controls auth, CORS and WebSocket origin enforcement.
+// Always serialised as the JSON zero value so secrets never leak via /api/config.
+type SecurityConfig struct {
+	AuthToken           string   `yaml:"auth_token"            json:"-"`
+	AllowedOrigins      []string `yaml:"allowed_origins"       json:"-"`
+	AllowedBrokerHosts  []string `yaml:"allowed_broker_hosts"  json:"-"`
+	AllowPrivateBrokers bool     `yaml:"allow_private_brokers" json:"-"`
+}
+
+// Redacted returns a deep copy of the config with all secret-bearing fields
+// (SASL credentials, TLS material) scrubbed. Use this for any response served
+// to a network caller.
+func (c *Config) Redacted() *Config {
+	cp := *c
+	cp.Kafka = redactKafka(cp.Kafka)
+	cp.KafkaInstances = make([]KafkaInstanceConfig, len(c.KafkaInstances))
+	for i, inst := range c.KafkaInstances {
+		ri := inst
+		ri.SASL = redactSASL(inst.SASL)
+		ri.TLS = redactTLS(inst.TLS)
+		cp.KafkaInstances[i] = ri
+	}
+	cp.Security = SecurityConfig{}
+	return &cp
+}
+
+func redactKafka(k KafkaConfig) KafkaConfig {
+	k.SASL = redactSASL(k.SASL)
+	k.TLS = redactTLS(k.TLS)
+	return k
+}
+
+func redactSASL(s SASLConfig) SASLConfig {
+	if s.Username != "" {
+		s.Username = "***"
+	}
+	if s.Password != "" {
+		s.Password = "***"
+	}
+	return s
+}
+
+func redactTLS(t TLSConfig) TLSConfig {
+	if t.CACert != "" {
+		t.CACert = "***"
+	}
+	if t.ClientCert != "" {
+		t.ClientCert = "***"
+	}
+	if t.ClientKey != "" {
+		t.ClientKey = "***"
+	}
+	return t
 }
 
 // KafkaInstanceConfig is a named Kafka cluster endpoint.
@@ -219,5 +275,23 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("DATA_DIR"); v != "" {
 		cfg.Storage.DataDir = v
+	}
+	if v := os.Getenv("DASHBOARD_AUTH_TOKEN"); v != "" {
+		cfg.Security.AuthToken = v
+	}
+	if v := os.Getenv("DASHBOARD_ALLOWED_ORIGINS"); v != "" {
+		cfg.Security.AllowedOrigins = strings.Split(v, ",")
+		for i := range cfg.Security.AllowedOrigins {
+			cfg.Security.AllowedOrigins[i] = strings.TrimSpace(cfg.Security.AllowedOrigins[i])
+		}
+	}
+	if v := os.Getenv("DASHBOARD_ALLOWED_BROKER_HOSTS"); v != "" {
+		cfg.Security.AllowedBrokerHosts = strings.Split(v, ",")
+		for i := range cfg.Security.AllowedBrokerHosts {
+			cfg.Security.AllowedBrokerHosts[i] = strings.TrimSpace(cfg.Security.AllowedBrokerHosts[i])
+		}
+	}
+	if v := os.Getenv("DASHBOARD_ALLOW_PRIVATE_BROKERS"); v == "true" {
+		cfg.Security.AllowPrivateBrokers = true
 	}
 }

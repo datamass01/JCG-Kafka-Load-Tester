@@ -2,6 +2,41 @@
 
 const PX_PER_POINT = 14;
 
+// ── Auth ────────────────────────────────────────────────
+const TOKEN_KEY = 'kafka_agent_token';
+let _authToken = null;
+
+async function ensureAuth() {
+  try {
+    const res = await fetch('/auth-config');
+    const cfg = await res.json();
+    if (!cfg.auth_required) return;
+    _authToken = localStorage.getItem(TOKEN_KEY) || '';
+    if (!_authToken) {
+      _authToken = window.prompt('Dashboard auth token:') || '';
+      if (_authToken) localStorage.setItem(TOKEN_KEY, _authToken);
+    }
+  } catch (e) {
+    // /auth-config unreachable — proceed without auth headers
+  }
+}
+
+// authFetch wraps fetch() to attach the bearer token when configured and
+// handles 401 by clearing the cached token so the next reload re-prompts.
+async function authFetch(url, init = {}) {
+  if (_authToken) {
+    init.headers = Object.assign({}, init.headers || {}, {
+      'Authorization': 'Bearer ' + _authToken,
+    });
+  }
+  const res = await fetch(url, init);
+  if (res.status === 401) {
+    localStorage.removeItem(TOKEN_KEY);
+    _authToken = null;
+  }
+  return res;
+}
+
 // ── Producer charts ──────────────────────────────────────
 const rateData    = { labels: [], datasets: [{ label: 'msg/sec', data: [], borderColor: '#00d2ff', backgroundColor: 'rgba(0,210,255,.08)', tension: .3, fill: true, pointRadius: 0 }] };
 const latencyData = { labels: [], datasets: [{ label: 'p99 ms',  data: [], borderColor: '#fc5a5a', backgroundColor: 'rgba(252,90,90,.08)',  tension: .3, fill: true, pointRadius: 0 }] };
@@ -20,11 +55,25 @@ const chartOpts = (yLabel) => ({
 });
 
 let chartRate, chartLatency, chartCRate, chartCLag;
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
   chartRate    = new Chart(document.getElementById('chart-rate'),    { type: 'line', data: rateData,    options: chartOpts('msg/sec') });
   chartLatency = new Chart(document.getElementById('chart-latency'), { type: 'line', data: latencyData, options: chartOpts('ms') });
   chartCRate   = new Chart(document.getElementById('chart-crate'),   { type: 'line', data: crateData,   options: chartOpts('msg/sec') });
   chartCLag    = new Chart(document.getElementById('chart-clag'),    { type: 'line', data: clagData,    options: chartOpts('messages') });
+
+  // Bind UI controls (CSP forbids inline onclick handlers).
+  document.querySelectorAll('.tab-btn[data-tab]').forEach(btn =>
+    btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
+  document.getElementById('btn-connect-brokers').addEventListener('click', connectBrokers);
+  document.getElementById('btn-clear-log').addEventListener('click', clearLog);
+  document.getElementById('btn-start').addEventListener('click', startTest);
+  document.getElementById('btn-stop').addEventListener('click', stopTest);
+  document.getElementById('cbtn-start').addEventListener('click', startConsumer);
+  document.getElementById('cbtn-stop').addEventListener('click', stopConsumer);
+  document.getElementById('btn-history-refresh').addEventListener('click', loadHistory);
+  document.getElementById('btn-consumer-history-refresh').addEventListener('click', loadConsumerHistory);
+
+  await ensureAuth();
   connectWS();
   loadHistory();
   loadConsumerHistory();
@@ -90,7 +139,14 @@ function logMsg(text, level = 'info') {
   const ts  = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const line = document.createElement('div');
   line.className = 'log-line';
-  line.innerHTML = `<span class="log-ts">${ts}</span><span class="log-msg ${level}">${text}</span>`;
+  const tsSpan = document.createElement('span');
+  tsSpan.className = 'log-ts';
+  tsSpan.textContent = ts;
+  const msgSpan = document.createElement('span');
+  msgSpan.className = 'log-msg ' + String(level).replace(/[^a-zA-Z0-9_-]/g, '');
+  msgSpan.textContent = text;
+  line.appendChild(tsSpan);
+  line.appendChild(msgSpan);
   el.appendChild(line);
   logLines++;
   if (logLines > LOG_MAX) {
@@ -107,7 +163,7 @@ function logDivider(label) {
 
 function clearLog() {
   const el = document.getElementById('event-log');
-  el.innerHTML = '';
+  el.textContent = '';
   logLines = 0;
   logMsg('Log cleared', 'info');
 }
@@ -120,7 +176,7 @@ async function connectBrokers() {
   if (!val) return;
   logMsg(`Connecting to brokers: ${val}`, 'info');
   try {
-    const res = await fetch('/api/kafka/connect', {
+    const res = await authFetch('/api/kafka/connect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ brokers: val }),
@@ -141,21 +197,27 @@ async function connectBrokers() {
 
 function renderConnectedBroker() {
   const el = document.getElementById('connected-broker');
-  if (!_connectedBroker) {
-    el.innerHTML = '';
-    return;
-  }
-  el.innerHTML = `<span class="connected-chip">
-    <span class="dot connected"></span>
-    ${_connectedBroker}
-    <button class="chip-disconnect" onclick="disconnectBroker()" title="Disconnect">&#x2715;</button>
-  </span>`;
+  el.textContent = '';
+  if (!_connectedBroker) return;
+  const chip = document.createElement('span');
+  chip.className = 'connected-chip';
+  const dot = document.createElement('span');
+  dot.className = 'dot connected';
+  chip.appendChild(dot);
+  chip.appendChild(document.createTextNode(' ' + _connectedBroker + ' '));
+  const btn = document.createElement('button');
+  btn.className = 'chip-disconnect';
+  btn.title = 'Disconnect';
+  btn.textContent = '✕';
+  btn.addEventListener('click', disconnectBroker);
+  chip.appendChild(btn);
+  el.appendChild(chip);
 }
 
 async function disconnectBroker() {
   logMsg(`Disconnecting from: ${_connectedBroker}`, 'info');
   try {
-    const res = await fetch('/api/kafka/disconnect', { method: 'POST' });
+    const res = await authFetch('/api/kafka/disconnect', { method: 'POST' });
     if (!res.ok) {
       const msg = await res.text();
       logMsg(`Disconnect failed: ${msg.trim()}`, 'error');
@@ -174,7 +236,8 @@ let ws, wsRetry = 1000;
 
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws/metrics`);
+  const qs = _authToken ? ('?token=' + encodeURIComponent(_authToken)) : '';
+  ws = new WebSocket(`${proto}://${location.host}/ws/metrics${qs}`);
 
   ws.onopen = () => {
     setDot('connected', 'Connected');
@@ -385,11 +448,22 @@ let _brokerState = {};
 function updateKafka(kafka) {
   if (!kafka) return;
   const brokerEl = document.getElementById('broker-list');
+  brokerEl.textContent = '';
   if (kafka.brokers && kafka.brokers.length) {
-    brokerEl.innerHTML = kafka.brokers.map(b =>
-      `<span class="broker-chip ${b.connected ? 'up' : 'down'}">node-${b.id}${b.is_controller ? ' <span class="leader-badge">leader</span>' : ''} · ${b.host} ${b.connected ? '✓' : '✗'}</span>`
-    ).join('');
     kafka.brokers.forEach(b => {
+      const chip = document.createElement('span');
+      chip.className = 'broker-chip ' + (b.connected ? 'up' : 'down');
+      chip.appendChild(document.createTextNode('node-' + b.id));
+      if (b.is_controller) {
+        chip.appendChild(document.createTextNode(' '));
+        const badge = document.createElement('span');
+        badge.className = 'leader-badge';
+        badge.textContent = 'leader';
+        chip.appendChild(badge);
+      }
+      chip.appendChild(document.createTextNode(' · ' + b.host + ' ' + (b.connected ? '✓' : '✗')));
+      brokerEl.appendChild(chip);
+
       const prev = _brokerState[b.host];
       if (prev === undefined && b.connected) {
         logMsg(`Broker connected: ${b.host}`, 'success');
@@ -401,21 +475,41 @@ function updateKafka(kafka) {
       _brokerState[b.host] = b.connected;
     });
   } else {
-    brokerEl.innerHTML = '<span style="color:var(--muted)">No brokers found</span>';
+    const empty = document.createElement('span');
+    empty.style.color = 'var(--muted)';
+    empty.textContent = 'No brokers found';
+    brokerEl.appendChild(empty);
   }
 
   const tbody = document.getElementById('topic-body');
+  tbody.textContent = '';
   if (kafka.topics && kafka.topics.length) {
-    tbody.innerHTML = kafka.topics.map(t => {
+    kafka.topics.forEach(t => {
       const totalOffset = Object.values(t.offsets_by_partition || {}).reduce((a, b) => a + b, 0);
-      return `<tr><td>${t.name}</td><td>${t.partitions}</td><td>${t.replication_factor}</td><td>${fmtNum(totalOffset)}</td></tr>`;
-    }).join('');
+      const tr = document.createElement('tr');
+      tr.appendChild(td(t.name));
+      tr.appendChild(td(t.partitions));
+      tr.appendChild(td(t.replication_factor));
+      tr.appendChild(td(fmtNum(totalOffset)));
+      tbody.appendChild(tr);
+    });
   } else {
-    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No user topics</td></tr>';
+    const tr = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = 4;
+    cell.style.color = 'var(--muted)';
+    cell.textContent = 'No user topics';
+    tr.appendChild(cell);
+    tbody.appendChild(tr);
   }
 
   if (kafka.collection_error) {
-    brokerEl.innerHTML += `<span style="color:var(--red);font-size:.75rem;margin-left:.5rem">${kafka.collection_error}</span>`;
+    const errSpan = document.createElement('span');
+    errSpan.style.color = 'var(--red)';
+    errSpan.style.fontSize = '.75rem';
+    errSpan.style.marginLeft = '.5rem';
+    errSpan.textContent = kafka.collection_error;
+    brokerEl.appendChild(errSpan);
     if (kafka.collection_error !== _lastKafkaError) {
       logMsg(`Kafka collection error: ${kafka.collection_error}`, 'error');
       _lastKafkaError = kafka.collection_error;
@@ -423,6 +517,12 @@ function updateKafka(kafka) {
   } else {
     _lastKafkaError = null;
   }
+}
+
+function td(text) {
+  const cell = document.createElement('td');
+  cell.textContent = text;
+  return cell;
 }
 let _lastKafkaError = null;
 
@@ -439,13 +539,13 @@ async function applyConfig() {
     key_strategy:       document.getElementById('cfg-key').value,
     value_strategy:     'random',
   };
-  await fetch('/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
+  await authFetch('/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
 }
 
 async function startTest() {
   logMsg('Applying config and sending start request…', 'info');
   await applyConfig();
-  const res = await fetch('/api/load/start', { method: 'POST' });
+  const res = await authFetch('/api/load/start', { method: 'POST' });
   if (!res.ok) {
     const msg = await res.text();
     logMsg(`Start failed: ${msg.trim()}`, 'error');
@@ -455,7 +555,7 @@ async function startTest() {
 
 async function stopTest() {
   logMsg('Stop requested by user', 'warn');
-  await fetch('/api/load/stop', { method: 'POST' });
+  await authFetch('/api/load/stop', { method: 'POST' });
 }
 
 // ── Consumer test controls ───────────────────────────────
@@ -466,13 +566,13 @@ async function applyConsumerConfig() {
     duration_seconds: parseInt(document.getElementById('ccfg-duration').value, 10),
     offset_reset:     document.getElementById('ccfg-offset').value,
   };
-  await fetch('/api/consumer/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
+  await authFetch('/api/consumer/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
 }
 
 async function startConsumer() {
   logMsg('Applying consumer config and sending start request…', 'info');
   await applyConsumerConfig();
-  const res = await fetch('/api/load/consumer/start', { method: 'POST' });
+  const res = await authFetch('/api/load/consumer/start', { method: 'POST' });
   if (!res.ok) {
     const msg = await res.text();
     logMsg(`Consumer start failed: ${msg.trim()}`, 'error');
@@ -482,67 +582,87 @@ async function startConsumer() {
 
 async function stopConsumer() {
   logMsg('Consumer stop requested by user', 'warn');
-  await fetch('/api/load/consumer/stop', { method: 'POST' });
+  await authFetch('/api/load/consumer/stop', { method: 'POST' });
 }
 
 // ── History ──────────────────────────────────────────────
+function placeholderRow(tbody, text, color) {
+  tbody.textContent = '';
+  const tr = document.createElement('tr');
+  const cell = document.createElement('td');
+  cell.colSpan = 10;
+  cell.style.textAlign = 'center';
+  if (color) cell.style.color = color;
+  cell.textContent = text;
+  tr.appendChild(cell);
+  tbody.appendChild(tr);
+}
+
+function appendRow(tbody, cells) {
+  const tr = document.createElement('tr');
+  cells.forEach(v => tr.appendChild(td(v)));
+  tbody.appendChild(tr);
+}
+
 async function loadHistory() {
   const tbody = document.getElementById('history-body');
-  tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--muted)">Loading…</td></tr>';
+  placeholderRow(tbody, 'Loading…', 'var(--muted)');
   try {
-    const res = await fetch('/api/metrics/history');
+    const res = await authFetch('/api/metrics/history');
     const runs = await res.json();
     if (!runs || !runs.length) {
-      tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--muted)">No runs yet</td></tr>';
+      placeholderRow(tbody, 'No runs yet', 'var(--muted)');
       return;
     }
-    tbody.innerHTML = runs.map(r => {
+    tbody.textContent = '';
+    runs.forEach(r => {
       const dur = (new Date(r.stopped_at) - new Date(r.started_at)) / 1000;
-      return `<tr>
-        <td>${new Date(r.started_at).toLocaleString()}</td>
-        <td>${fmtDur(dur)}</td>
-        <td>${r.topic}</td>
-        <td>${r.workers}</td>
-        <td>${fmtNum(r.target_msg_per_sec)}</td>
-        <td>${fmtNum(r.total_messages_sent)}</td>
-        <td>${fmtNum(r.total_errors)}</td>
-        <td>${r.avg_msg_per_sec.toFixed(0)}</td>
-        <td>${r.avg_mb_per_sec.toFixed(2)}</td>
-        <td>${r.avg_latency_p99_ms.toFixed(1)}</td>
-      </tr>`;
-    }).join('');
+      appendRow(tbody, [
+        new Date(r.started_at).toLocaleString(),
+        fmtDur(dur),
+        r.topic,
+        r.workers,
+        fmtNum(r.target_msg_per_sec),
+        fmtNum(r.total_messages_sent),
+        fmtNum(r.total_errors),
+        r.avg_msg_per_sec.toFixed(0),
+        r.avg_mb_per_sec.toFixed(2),
+        r.avg_latency_p99_ms.toFixed(1),
+      ]);
+    });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="10" style="color:var(--red)">${e}</td></tr>`;
+    placeholderRow(tbody, String(e), 'var(--red)');
   }
 }
 
 async function loadConsumerHistory() {
   const tbody = document.getElementById('consumer-history-body');
-  tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--muted)">Loading…</td></tr>';
+  placeholderRow(tbody, 'Loading…', 'var(--muted)');
   try {
-    const res = await fetch('/api/metrics/consumer/history');
+    const res = await authFetch('/api/metrics/consumer/history');
     const runs = await res.json();
     if (!runs || !runs.length) {
-      tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--muted)">No runs yet</td></tr>';
+      placeholderRow(tbody, 'No runs yet', 'var(--muted)');
       return;
     }
-    tbody.innerHTML = runs.map(r => {
+    tbody.textContent = '';
+    runs.forEach(r => {
       const dur = (new Date(r.stopped_at) - new Date(r.started_at)) / 1000;
-      return `<tr>
-        <td>${new Date(r.started_at).toLocaleString()}</td>
-        <td>${fmtDur(dur)}</td>
-        <td>${r.topic}</td>
-        <td>${r.consumer_group}</td>
-        <td>${r.offset_reset}</td>
-        <td>${fmtNum(r.total_messages_consumed)}</td>
-        <td>${fmtNum(r.total_errors)}</td>
-        <td>${r.avg_msg_per_sec.toFixed(0)}</td>
-        <td>${r.avg_mb_per_sec.toFixed(2)}</td>
-        <td>${r.avg_latency_p99_ms.toFixed(1)}</td>
-      </tr>`;
-    }).join('');
+      appendRow(tbody, [
+        new Date(r.started_at).toLocaleString(),
+        fmtDur(dur),
+        r.topic,
+        r.consumer_group,
+        r.offset_reset,
+        fmtNum(r.total_messages_consumed),
+        fmtNum(r.total_errors),
+        r.avg_msg_per_sec.toFixed(0),
+        r.avg_mb_per_sec.toFixed(2),
+        r.avg_latency_p99_ms.toFixed(1),
+      ]);
+    });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="10" style="color:var(--red)">${e}</td></tr>`;
+    placeholderRow(tbody, String(e), 'var(--red)');
   }
 }
 

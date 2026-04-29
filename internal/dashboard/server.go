@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/gorilla/websocket"
 	"kafka-agent/internal/config"
 	"kafka-agent/internal/kafka"
 	"kafka-agent/internal/metrics"
@@ -41,6 +42,9 @@ func NewServer(
 	consumer.SetLogSink(s)
 	producer.SetOnStop(s.saveRun)
 	consumer.SetOnStop(s.saveConsumerRun)
+	upgrader = websocket.Upgrader{
+		CheckOrigin: s.wsOriginAllowed,
+	}
 	return s
 }
 
@@ -137,14 +141,18 @@ func (s *Server) Run(ctx context.Context) error {
 	s.instanceMu.Unlock()
 
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(requestLogger)
 	r.Use(middleware.Recoverer)
-	r.Use(corsMiddleware)
+	r.Use(securityHeaders)
+	r.Use(s.corsMiddleware)
 
 	r.Get("/health", s.handleHealth)
 	r.Get("/ready", s.handleReady)
+	r.Get("/auth-config", s.handleAuthConfig)
 
 	r.Route("/api", func(r chi.Router) {
+		r.Use(s.csrfGuard)
+		r.Use(s.authMiddleware)
 		r.Get("/config", s.handleGetConfig)
 		r.Put("/config", s.handleUpdateConfig)
 		r.Get("/kafka/brokers", s.handleBrokers)
@@ -164,7 +172,10 @@ func (s *Server) Run(ctx context.Context) error {
 		r.Get("/metrics/consumer/history", s.handleConsumerHistory)
 	})
 
-	r.Get("/ws/metrics", s.handleWS)
+	r.Group(func(r chi.Router) {
+		r.Use(s.authMiddleware)
+		r.Get("/ws/metrics", s.handleWS)
+	})
 
 	// Serve embedded web UI
 	r.Handle("/*", http.FileServer(http.FS(web.Assets)))
@@ -289,15 +300,3 @@ func (s *Server) broadcastLoop(ctx context.Context) {
 	}
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}

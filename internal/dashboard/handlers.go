@@ -16,9 +16,9 @@ import (
 	"kafka-agent/internal/storage"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
+// upgrader is initialised in NewServer so CheckOrigin can call back into the
+// server's allow-list logic.
+var upgrader websocket.Upgrader
 
 type Server struct {
 	cfg          *config.Config
@@ -55,8 +55,14 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleAuthConfig reports whether the dashboard requires a bearer token.
+// The token itself is never returned — the SPA prompts the user for it.
+func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]bool{"auth_required": s.cfg.Security.AuthToken != ""})
+}
+
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.cfg)
+	writeJSON(w, s.cfg.Redacted())
 }
 
 func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
@@ -65,8 +71,22 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var patch config.LoadTestConfig
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&patch); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !validKafkaName(patch.Topic) {
+		http.Error(w, "invalid topic: must match [a-zA-Z0-9._-]{1,249}", http.StatusBadRequest)
+		return
+	}
+	if patch.KeyStrategy != "" && !validKafkaName(patch.KeyStrategy) {
+		http.Error(w, "invalid key_strategy", http.StatusBadRequest)
+		return
+	}
+	if patch.ValueStrategy != "" && !validKafkaName(patch.ValueStrategy) {
+		http.Error(w, "invalid value_strategy", http.StatusBadRequest)
 		return
 	}
 	s.cfg.LoadTest = patch
@@ -102,6 +122,16 @@ func (s *Server) handleConnectBrokers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "brokers required", http.StatusBadRequest)
 		return
 	}
+	for _, b := range brokers {
+		if !validBrokerEntry(b) {
+			http.Error(w, "invalid broker entry: must be host:port", http.StatusBadRequest)
+			return
+		}
+		if err := s.brokerHostAllowed(b); err != nil {
+			http.Error(w, "broker not allowed", http.StatusForbidden)
+			return
+		}
+	}
 	name := strings.Join(brokers, ",")
 
 	s.instanceMu.Lock()
@@ -110,6 +140,9 @@ func (s *Server) handleConnectBrokers(w http.ResponseWriter, r *http.Request) {
 		if active := s.cfg.ActiveKafkaInstance(); active != nil {
 			version = active.Version
 		}
+		// Ad-hoc instances are deliberately created with empty SASL/TLS so that
+		// the configured Kafka credentials cannot be exfiltrated to a caller-
+		// supplied broker. Authenticated brokers must be declared in YAML.
 		s.cfg.KafkaInstances = append(s.cfg.KafkaInstances, config.KafkaInstanceConfig{
 			Name:    name,
 			Brokers: brokers,
@@ -225,6 +258,10 @@ func (s *Server) handleConsumerHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	if !s.wsOriginAllowed(r) {
+		http.Error(w, "forbidden origin", http.StatusForbidden)
+		return
+	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -274,8 +311,22 @@ func (s *Server) handleUpdateConsumerConfig(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var patch config.ConsumerTestConfig
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&patch); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !validKafkaName(patch.Topic) {
+		http.Error(w, "invalid topic: must match [a-zA-Z0-9._-]{1,249}", http.StatusBadRequest)
+		return
+	}
+	if !validKafkaName(patch.ConsumerGroup) {
+		http.Error(w, "invalid consumer_group: must match [a-zA-Z0-9._-]{1,249}", http.StatusBadRequest)
+		return
+	}
+	if patch.OffsetReset != "" && patch.OffsetReset != "earliest" && patch.OffsetReset != "latest" {
+		http.Error(w, "invalid offset_reset: must be earliest or latest", http.StatusBadRequest)
 		return
 	}
 	s.cfg.ConsumerTest = patch

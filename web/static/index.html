@@ -4,7 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Kafka Load Tester</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"
+          integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC"
+          crossorigin="anonymous"></script>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,8 +14,8 @@
     <div class="header-inner">
       <h1>Kafka Load Tester</h1>
       <div class="tab-bar">
-        <button class="tab-btn active" id="tab-btn-producer" onclick="switchTab('producer')">Producer</button>
-        <button class="tab-btn" id="tab-btn-consumer" onclick="switchTab('consumer')">Consumer</button>
+        <button class="tab-btn active" id="tab-btn-producer" data-tab="producer">Producer</button>
+        <button class="tab-btn" id="tab-btn-consumer" data-tab="consumer">Consumer</button>
       </div>
       <div class="conn-status">
         <span class="dot" id="ws-dot"></span>
@@ -28,7 +30,7 @@
       <h2>Kafka Instance</h2>
       <div class="instance-row">
         <input id="instance-manual" type="text" placeholder="Enter brokers: host:port,host:port" style="flex:1;min-width:220px">
-        <button class="btn-secondary" onclick="connectBrokers()">Connect</button>
+        <button class="btn-secondary" id="btn-connect-brokers">Connect</button>
       </div>
       <div id="connected-broker"></div>
     </section>
@@ -48,7 +50,7 @@
     <section class="card full-width" id="event-log-section">
       <div class="log-header">
         <h2>Event Log</h2>
-        <button class="btn-secondary" onclick="clearLog()">Clear</button>
+        <button class="btn-secondary" id="btn-clear-log">Clear</button>
       </div>
       <div id="event-log" class="event-log"></div>
     </section>
@@ -74,8 +76,8 @@
           </label>
         </div>
         <div class="action-row">
-          <button id="btn-start" class="btn-primary" onclick="startTest()">Start</button>
-          <button id="btn-stop" class="btn-danger" onclick="stopTest()" disabled>Stop</button>
+          <button id="btn-start" class="btn-primary">Start</button>
+          <button id="btn-stop" class="btn-danger" disabled>Stop</button>
           <span id="test-status" class="status-badge idle">Idle</span>
           <span id="elapsed-label"></span>
         </div>
@@ -120,7 +122,7 @@
       <section class="card full-width" id="history-section">
         <div class="history-header">
           <h2>Run History</h2>
-          <button class="btn-secondary" onclick="loadHistory()">Refresh</button>
+          <button class="btn-secondary" id="btn-history-refresh">Refresh</button>
         </div>
         <table id="history-table">
           <thead>
@@ -155,8 +157,8 @@
           </label>
         </div>
         <div class="action-row">
-          <button id="cbtn-start" class="btn-primary" onclick="startConsumer()">Start</button>
-          <button id="cbtn-stop" class="btn-danger" onclick="stopConsumer()" disabled>Stop</button>
+          <button id="cbtn-start" class="btn-primary">Start</button>
+          <button id="cbtn-stop" class="btn-danger" disabled>Stop</button>
           <span id="consumer-status" class="status-badge idle">Idle</span>
           <span id="consumer-elapsed-label"></span>
         </div>
@@ -202,7 +204,7 @@
       <section class="card full-width" id="consumer-history-section">
         <div class="history-header">
           <h2>Consumer Run History</h2>
-          <button class="btn-secondary" onclick="loadConsumerHistory()">Refresh</button>
+          <button class="btn-secondary" id="btn-consumer-history-refresh">Refresh</button>
         </div>
         <table id="consumer-history-table">
           <thead>
