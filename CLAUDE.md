@@ -2,6 +2,17 @@
 
 Kafka load testing dashboard — Go web application that generates configurable load against a Kafka cluster and displays real-time health and performance metrics in a browser dashboard.
 
+## Tech Stack
+
+| Layer | Library | Version | Purpose |
+|---|---|---|---|
+| Kafka client | [github.com/IBM/sarama](https://github.com/IBM/sarama) | v1.47.0 | AsyncProducer, ConsumerGroup, ClusterAdmin — all Kafka I/O |
+| HTTP router | [github.com/go-chi/chi/v5](https://github.com/go-chi/chi) | v5.2.5 | REST API routing and middleware |
+| WebSocket | [github.com/gorilla/websocket](https://github.com/gorilla/websocket) | v1.5.3 | Real-time metrics push to browser |
+| SCRAM auth | [github.com/xdg-go/scram](https://github.com/xdg-go/scram) | v1.2.0 | SASL/SCRAM-SHA-256 and SCRAM-SHA-512 for Kafka auth |
+| Frontend | Chart.js (CDN) | — | Throughput and latency charts in the dashboard |
+| Kafka broker | apache/kafka | 3.8.0 | KRaft mode (no Zookeeper); three-node cluster in Docker Compose |
+
 ## Build & Run
 
 ```bash

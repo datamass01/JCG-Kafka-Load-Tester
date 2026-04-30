@@ -78,6 +78,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 		consumerCfg.Consumer.Offsets.Initial = sarama.OffsetNewest
 	}
 
+	c.resetGroupOffsets(&consumerCfg)
 	c.logf("info", "creating consumer group (brokers=%v topic=%s group=%s)", c.brokers, c.cfg.Topic, c.cfg.ConsumerGroup)
 
 	group, err := sarama.NewConsumerGroup(c.brokers, c.cfg.ConsumerGroup, &consumerCfg)
@@ -146,6 +147,28 @@ func (c *Consumer) Start(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+// resetGroupOffsets deletes committed offsets for the consumer group so that
+// OffsetNewest/OffsetOldest applies cleanly on every test run, regardless of
+// what was committed by a previous run.
+func (c *Consumer) resetGroupOffsets(cfg *sarama.Config) {
+	admin, err := sarama.NewClusterAdmin(c.brokers, cfg)
+	if err != nil {
+		c.logf("warn", "could not create admin client for offset reset: %v", err)
+		return
+	}
+	defer admin.Close()
+
+	meta, err := admin.DescribeTopics([]string{c.cfg.Topic})
+	if err != nil || len(meta) == 0 || meta[0].Err != sarama.ErrNoError {
+		c.logf("warn", "could not describe topic for offset reset: %v", err)
+		return
+	}
+	for _, p := range meta[0].Partitions {
+		// Errors here mean no committed offset exists for this partition — safe to ignore.
+		_ = admin.DeleteConsumerGroupOffset(c.cfg.ConsumerGroup, c.cfg.Topic, p.ID)
+	}
 }
 
 func (c *Consumer) Stop() {
